@@ -9,6 +9,8 @@ use Parallel::ForkManager;
 use Data::Dumper;
 use Config::Simple;
 use Getopt::Long;
+use IO::Select;
+use Pod::Usage;
 use File::Basename qw(basename dirname);
 use FindBin qw($Bin);
 
@@ -32,11 +34,12 @@ my $cfg_cmd_opt = $main_cfg->param(-block => 'COMMAND');
 
 my ($cli_self_opt, $cli_ssh_opt, $cli_rsync_opt, $cli_cmd_opt);
 my ($help, $debug) = (0, 0);
+
 # parse cli options
 GetOptions(
     'help|h'                => \$help,
-    'debug=i'               => \$debug,
-    'max-proc=i'            => \$cli_self_opt->{max_proc},
+    'debug|d=i'             => \$debug,
+    'max-proc|P=i'            => \$cli_self_opt->{max_proc},
 
     'connect-timeout=i'     => \$cli_ssh_opt->{timeout},
     'command-timeout=i'     => \$cli_cmd_opt->{timeout},
@@ -49,7 +52,7 @@ GetOptions(
     'password|p=s'	    => \$cli_ssh_opt->{password},
     'key-path|i:s'          => \$cli_ssh_opt->{key_path},
 
-    'remote-cmd|c=s'        => \$cli_self_opt->{remote_cmd},
+    'cmd|c=s'               => \$cli_self_opt->{remote_cmd},
     'push-files|s=s{,}'     => \@{$cli_self_opt->{push_files}},
     'pull-files|g=s{,}'     => \@{$cli_self_opt->{pull_files}},
     'local-dir|l=s'         => \$cli_self_opt->{local_dir},
@@ -121,10 +124,22 @@ if($cfg{self_opt}->{method} eq "key") {
     pod2usage(2);
 }
 
-print Dumper(\%cfg);
-#exit 0;
-my $hosts = [ qw(172.17.151.165 10.161.130.145) ];
+print Dumper(\%cfg) if $debug;
+
+# main routine
+my $hosts;
+my $s = IO::Select->new();
+$s->add(\*STDIN);
+
+if($cfg{self_opt}->{host}) {
+    $hosts = &get_hosts($cfg{self_opt}->{host});
+} elsif($s->can_read(.5)) { 
+    $hosts = &get_hosts_by_stdin;
+} else {
+    die "Please specify -h <host>:$!\n";
+}
 parallel_job(\&ssh_job, $cfg{self_opt}, $hosts, 20);
+
 # the most important function
 # call ssh or rsync on remote side
 # its behavior depends on \%opt
@@ -215,15 +230,20 @@ sub process_results {
     my $results = shift;
     my $rt=1;
 
-    my $date = `date "+%Y-%m-%d %H:%M"`;
-    chomp($date);
-    print "=" x 20, $date, "=" x 20, "\n";
+    #my $date = `date "+%Y-%m-%d %H:%M"`;
+    #chomp($date);
+    #print "=" x 20, $date, "=" x 20, "\n";
     for my $r (@{$results}) {
 	$rt = 0 if ($r->{exit_code} == 1);	# ssh return 0 for true, perl return non-zero for true
-	printf "%-7s%-16s\n", ($r->{exit_code} ? "[FAIL]" : "[OK]"), "$r->{ip}:";
-	printf "%-16s%-s", " ", $r->{stdout} if $r->{stdout};
+	my $prefix = sprintf("%-7s%-16s", ($r->{exit_code} ? "[FAIL]" : "[OK]"), "$r->{ip}:");
+	if($r->{stdout}) {
+	    (my $output = $r->{stdout}) =~ s/^/$prefix\t/smg;
+	    print "$output";
+	} else {
+	    print "$prefix\n";
+	}
     }
-    print "\n", "=" x 56, "\n";
+    #print "\n", "=" x 56, "\n";
 
     # Summary
     my @fail = grep { $_->{exit_code} } @{$results};
@@ -237,3 +257,121 @@ sub process_results {
     return $rt;
 }
 
+# return InnerIP from stdin
+sub get_hosts_by_stdin {
+    my @hosts;
+    while(<>) {
+	next if /^#|^\s*$/;
+	chomp;
+	s/^\s+//;
+	s/\s+$//;
+	push @hosts, $_;
+    }
+    return wantarray ? @hosts : \@hosts;
+}
+
+# return InnerIP of one file
+sub get_hosts_by_file {
+    my $query_file = shift;
+    open my $fh, '<', $query_file 
+	or die "can't open $query_file :$!\n";
+    my @hosts = grep { !/^#/ } 
+    			map { (split(/\s+/))[0] } <$fh>;
+    close($fh);
+    return @hosts;
+}
+
+# return InnerIP of
+# 1. ip itself
+# 2. one module
+# 3. multiple modules
+# 4. any combinatin of the above
+sub get_hosts {
+    my $dst = shift;
+    my $h = &conv_to_array_ref($dst);
+    my @hosts;
+    for my $d (@{$h}) {
+	if($d =~ /((\d){1,3}\.){3}(\d){1,3}/) {
+	    push @hosts, $d;
+	} elsif ($d =~ m{^/} && -f $d) {
+	    push @hosts, &get_hosts_by_file($d);
+	} else {
+	    print STDERR "invalid host: $d\n";
+	    exit 1;
+	}
+    }
+    return \@hosts;
+}
+
+# convert string or array ref => array ref
+sub conv_to_array_ref {
+    my $scalar = shift;
+    my @array;
+
+    if(ref($scalar) eq "") {
+	@array= map { s/^\s*//; s/\s*$//; $_ } split(/,/, $scalar);
+    } elsif(ref($scalar) eq "ARRAY") {
+	@array=@{$scalar};
+    } else {
+	return 0;
+    }
+    return \@array;
+}
+
+__END__
+
+=head1 NAME
+
+	Mussh - Multi hosts ssh management tools
+
+=head1 SYNOPSIS
+
+	mussh.pl [OPTIONS] 
+	mussh.pl -c "date" -h ip.lst
+	mussh.pl -s test.sh -r /tmp -c "bash /tmp/test.sh" -h ip.lst
+	mussh.pl -g /tmp/result.txt -l /home/user/result/ -h ip.lst
+
+=head1 DESCRIPTION
+
+	mussh execute commands on multihosts, push local files to remote hosts, or pull remote files back to 
+	the local directory. It's the essential task for most SA, and is helpful fo implement some centralized
+	monitor.
+
+=head1 OPTIONS
+
+	-c, --cmd		remote command
+	-s, --push-files	files need to be pushed
+	-r, --remote-dir	remote directory where files push under
+	-g, --pull-files	files need to be pulled
+	-l, --local-dir		local directory where files pull under
+
+	-h, --host		host file or host ip separated by comma(,)
+	-m, --method		ssh authetic method(password or key)
+	-u, --user		ssh username 
+	-p, --password		ssh password (password method only)
+	-i, --key-path		ssh key path (key method only)
+
+	-h, --help		help info
+	-d, --debug		enable debug
+	-P, --max-proc		maximum parallel ssh process
+
+	--connect-timeout	ssh connection timeout
+	--command-timeout	ssh execute command timeout
+	--sync-timeout		rsync timeout
+	--bwlimit		rsync --bwlimit value
+
+=head1 AUTHOR
+
+	alickchen@tencent(Qingsu Chen)
+
+=head1 BUGS
+
+	need document
+
+=head1 SEE ALSO
+
+	Net::OpenSSH Parallel::ForkManager rsync(1)
+
+=head1 COPYRIGHT
+
+	this program is free software. You may copy or redistribute it under the same terms as Perl itself.
