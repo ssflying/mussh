@@ -40,6 +40,7 @@ GetOptions(
     'help'                  => \$help,
     'debug|d=i'             => \$debug,
     'max-proc|P=i'          => \$cli_self_opt->{max_proc},
+    'summary'             => \$cli_self_opt->{summary},
 
     'connect-timeout=i'     => \$cli_ssh_opt->{timeout},
     'command-timeout=i'     => \$cli_cmd_opt->{timeout},
@@ -147,7 +148,7 @@ sub ssh_job {
     my ($ip, $opt, $return) = @_;
 
     # redirect master stderr to /dev/null unless debugging
-    my $ssh_file = $debug >= 1 ? "log/master.$ip.log" : "/dev/null";
+    my $ssh_file = $debug >= 1 ? "master.$ip.log" : "/dev/null";
     open my $fh, "> $ssh_file" or die "$!";
     $cfg{ssh_opt}->{master_stderr_fh} = $fh,
 
@@ -194,12 +195,14 @@ sub ssh_job {
 sub parallel_job {
     my ($sub, $opt, $array, $max_proc) = @_;
     my $pm = new Parallel::ForkManager($max_proc);
-    my @results;
+    my (@results, $count);
 
+    $count = scalar @{$array} + 1;
     $pm->run_on_finish ( # called BEFORE the first call to start()
 	sub {
 	    my ($pid, $exit_code, $ident, $exit_signal, $core_dump, $return) = @_;
 
+	    $count--;
 	    if (defined($return)) {  # children are not forced to send anything
 		$return->{ip} = $ident;
 
@@ -209,7 +212,16 @@ sub parallel_job {
 		} else {
 		    $return->{exit_code}=0;
 		}
-		push @results, $return;
+
+		push @results, $return;			# for summary
+
+		my $prefix = sprintf("%-5s%-7s%-16s", $count, ($return->{exit_code} ? "[FAIL]" : "[OK]"), "$return->{ip}");
+		if($return->{stdout}) {
+		    (my $output = $return->{stdout}) =~ s/^/$prefix\t/smg;
+		    print "$output";
+		} else {
+		    print "$prefix\n";
+		}
 	    } else {  # problems occuring during storage or retrieval will throw a warning
 		print qq|No message received from child process $pid!\n|;
 	    }
@@ -222,28 +234,13 @@ sub parallel_job {
 	$pm->finish(0, \%return);
     }
     $pm->wait_all_children;
-    process_results(\@results);
+    print Dumper($opt) if $debug;
+    process_results(\@results) if $opt->{summary};
 }
 
 # display results in a custom way
 sub process_results {
     my $results = shift;
-    my $rt=1;
-
-    #my $date = `date "+%Y-%m-%d %H:%M"`;
-    #chomp($date);
-    #print "=" x 20, $date, "=" x 20, "\n";
-    for my $r (@{$results}) {
-	$rt = 0 if ($r->{exit_code} == 1);	# ssh return 0 for true, perl return non-zero for true
-	my $prefix = sprintf("%-7s%-16s", ($r->{exit_code} ? "[FAIL]" : "[OK]"), "$r->{ip}:");
-	if($r->{stdout}) {
-	    (my $output = $r->{stdout}) =~ s/^/$prefix\t/smg;
-	    print "$output";
-	} else {
-	    print "$prefix\n";
-	}
-    }
-    #print "\n", "=" x 56, "\n";
 
     # Summary
     my @fail = grep { $_->{exit_code} } @{$results};
@@ -254,7 +251,6 @@ sub process_results {
 	print $_->{ip} . "\n" for @fail;
 	print "\n";
     }
-    return $rt;
 }
 
 # return InnerIP from stdin
