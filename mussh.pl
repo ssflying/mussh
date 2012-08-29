@@ -37,9 +37,9 @@ my ($help, $debug) = (0, 0);
 
 # parse cli options
 GetOptions(
-    'help|h'                => \$help,
+    'help'                  => \$help,
     'debug|d=i'             => \$debug,
-    'max-proc|P=i'            => \$cli_self_opt->{max_proc},
+    'max-proc|P=i'          => \$cli_self_opt->{max_proc},
 
     'connect-timeout=i'     => \$cli_ssh_opt->{timeout},
     'command-timeout=i'     => \$cli_cmd_opt->{timeout},
