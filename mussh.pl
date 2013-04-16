@@ -3,11 +3,14 @@ use warnings;
 use strict;
 use version;
 
-use File::Basename;
+# from CPAN
 use Net::OpenSSH;
 use Parallel::ForkManager;
-use Data::Dumper;
 use Config::Simple;
+
+# built-in
+use File::Basename;
+use Data::Dumper;
 use Getopt::Long;
 use IO::Select;
 use Pod::Usage;
@@ -26,16 +29,19 @@ my $self_name = basename(basename($0), ".pl");
 my $self_conf = "$self_dir/$self_name".".conf";
 
 # read config file
-my $main_cfg = new Config::Simple($self_conf) || die Config::Simple->error();
-my $cfg_self_opt = $main_cfg->param(-block => 'MAIN');
-my $cfg_ssh_opt = $main_cfg->param(-block => 'SSH');
-my $cfg_rsync_opt = $main_cfg->param(-block => 'RSYNC');
-my $cfg_cmd_opt = $main_cfg->param(-block => 'COMMAND');
+my $config_file = -r $self_conf ? $self_conf : "$ENV{HOME}/.musshrc" ;
+die "can't found config file.\n" unless -r $config_file;
 
-my ($cli_self_opt, $cli_ssh_opt, $cli_rsync_opt, $cli_cmd_opt);
-my ($help, $debug) = (0, 0);
+my ($cfg_self_opt, $cfg_ssh_opt, $cfg_rsync_opt, $cfg_cmd_opt);
+my $main_cfg = new Config::Simple($config_file) || die Config::Simple->error();
+$cfg_self_opt = $main_cfg->param(-block => 'MAIN');
+$cfg_ssh_opt = $main_cfg->param(-block => 'SSH');
+$cfg_rsync_opt = $main_cfg->param(-block => 'RSYNC');
+$cfg_cmd_opt = $main_cfg->param(-block => 'COMMAND');
 
 # parse cli options
+my ($cli_self_opt, $cli_ssh_opt, $cli_rsync_opt, $cli_cmd_opt);
+my ($help, $debug) = (0, 0);
 GetOptions(
     'help'                  => \$help,
     'debug|d=i'             => \$debug,
@@ -215,7 +221,7 @@ sub parallel_job {
 
 		push @results, $return;			# for summary
 
-		my $prefix = sprintf("%-5s%-7s%-16s", $count, ($return->{exit_code} ? "[FAIL]" : "[OK]"), "$return->{ip}");
+		my $prefix = sprintf("%-7s%-5s%-16s", ($return->{exit_code} ? "[FAIL]" : "[OK]"), $count, "$return->{ip}");
 		if($return->{stdout}) {
 		    (my $output = $return->{stdout}) =~ s/^/$prefix\t/smg;
 		    print "$output";
@@ -289,7 +295,7 @@ sub get_hosts {
     for my $d (@{$h}) {
 	if($d =~ /((\d){1,3}\.){3}(\d){1,3}/) {
 	    push @hosts, $d;
-	} elsif ($d =~ m{^/} && -f $d) {
+	} elsif (-f $d) {	# CAUTION: need revised
 	    push @hosts, &get_hosts_by_file($d);
 	} else {
 	    print STDERR "invalid host: $d\n";
